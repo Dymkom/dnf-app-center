@@ -2230,6 +2230,7 @@ class MainWindow(Adw.ApplicationWindow):
         if not in_search_mode and self.current_group == "system" and self.current_page == "queue":
             self.title_label.set_text(CATEGORY_GROUPS["system"]["queue"])
             self.status_label.set_text("")
+            self.updates_action_bar.set_visible(False)
             self._refresh_queue_page()
             self.stack.set_visible_child_name("queue")
             if preserve_scroll:
