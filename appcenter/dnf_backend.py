@@ -46,6 +46,7 @@ class DnfBackend:
         self._helper_proc: subprocess.Popen[str] | None = None
         self._helper_lock = threading.Lock()
         self._repo_priority_cache: dict[str, tuple[int, str]] = {}
+        self._installed_packages_raw: list[AppEntry] | None = None
         self.cache_authorization = True
         self.reload_state()
 
@@ -77,6 +78,7 @@ class DnfBackend:
         self.base = self._create_base(force_refresh=force_refresh)
         self._repo_priority_cache = self._build_repo_priority_cache()
         self._invalidate_package_search_cache()
+        self._installed_packages_raw = None
 
     def set_cache_authorization(self, enabled: bool) -> None:
         self.cache_authorization = bool(enabled)
@@ -319,17 +321,20 @@ class DnfBackend:
 
 
     def get_installed_packages(self, repo_id: str = "__all__") -> list[AppEntry]:
-        cache: dict[str, AppEntry] = {}
-        installed_q = self.libdnf5.rpm.PackageQuery(self.base)
-        installed_q.filter_installed()
-        for pkg in installed_q:
-            self._ingest_pkg_into_cache(cache, pkg, installed=True)
+        if self._installed_packages_raw is None:
+            cache: dict[str, AppEntry] = {}
+            installed_q = self.libdnf5.rpm.PackageQuery(self.base)
+            installed_q.filter_installed()
+            for pkg in installed_q:
+                self._ingest_pkg_into_cache(cache, pkg, installed=True)
+            raw = list(cache.values())
+            raw.sort(key=lambda app: app.name.casefold())
+            self._installed_packages_raw = raw
 
-        items = list(cache.values())
+        items = self._installed_packages_raw
         if repo_id != "__all__":
             items = [app for app in items if repo_id in app.repo_ids or "@System" in app.repo_ids or "@system" in app.repo_ids]
-        items.sort(key=lambda app: app.name.casefold())
-        return items
+        return list(items)
 
     def get_upgradable_packages(self, repo_id: str = "__all__") -> list[AppEntry]:
         """Return all packages from the solver-backed upgrade transaction.
