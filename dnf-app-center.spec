@@ -1,12 +1,12 @@
 Name:           dnf-app-center
-Version:        0.1.0
-Release:        2%{?dist}
+Version:        0.1.4
+Release:        1%{?dist}
 Summary:        GTK App Center for DNF/AppStream with updater tray service
 
 # Replace this with your real SPDX license identifier before distributing publicly.
 License:        GPL-2.0-only
-URL:            https://example.invalid/dnf-app-center
-Source0:        %{name}-%{version}-configurable-feed.tar.gz
+URL:            https://github.com/Nobara-Project/dnf-app-center
+Source0:        %{url}/archive/refs/tags/%{version}.tar.gz
 %global _update_feed_url https://updates.nobaraproject.org/updates.txt
 
 BuildArch:      noarch
@@ -27,6 +27,14 @@ Requires:       polkit
 Requires:       python3-gobject
 Requires:       python3-libdnf5
 Requires:       xdg-utils
+
+Provides:       dnf-app-center
+Provides:       yumex
+Provides:       yumex-dnf
+Provides:       yumex-updater
+Obsoletes:      yumex
+Obsoletes:      yumex-dnf
+Obsoletes:      yumex-updater
 
 %description
 DNF App Center is a GTK-based App Center for Fedora-family systems that uses
