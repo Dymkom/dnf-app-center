@@ -47,6 +47,7 @@ class DnfBackend:
         self._helper_lock = threading.Lock()
         self._repo_priority_cache: dict[str, tuple[int, str]] = {}
         self._installed_packages_raw: list[AppEntry] | None = None
+        self._upgradable_packages_raw: list[AppEntry] | None = None
         self.cache_authorization = True
         self.reload_state()
 
@@ -79,6 +80,7 @@ class DnfBackend:
         self._repo_priority_cache = self._build_repo_priority_cache()
         self._invalidate_package_search_cache()
         self._installed_packages_raw = None
+        self._upgradable_packages_raw = None
 
     def set_cache_authorization(self, enabled: bool) -> None:
         self.cache_authorization = bool(enabled)
@@ -343,53 +345,50 @@ class DnfBackend:
         run an upgrade-all goal, inspect the resolved transaction, and include
         every inbound package action that DNF5 would actually perform.
         """
-        cache: dict[str, AppEntry] = {}
-        transaction = self._resolve_upgrade_transaction()
-        if transaction is None:
-            return []
+        if self._upgradable_packages_raw is None:
+            cache: dict[str, AppEntry] = {}
+            transaction = self._resolve_upgrade_transaction()
+            if transaction is not None:
+                for tspkg in self._iter_transaction_packages(transaction):
+                    pkg = self._transaction_package_payload(tspkg)
+                    if pkg is None:
+                        continue
+                    action = self._transaction_package_action(tspkg)
+                    if not self._is_update_list_action(action):
+                        continue
 
-        for tspkg in self._iter_transaction_packages(transaction):
-            pkg = self._transaction_package_payload(tspkg)
-            if pkg is None:
-                continue
-            action = self._transaction_package_action(tspkg)
-            if not self._is_update_list_action(action):
-                continue
-            pkg_repo_id = self._safe_pkg_text(pkg, "get_repo_id")
-            if repo_id != "__all__" and pkg_repo_id != repo_id:
-                continue
+                    name = self._safe_pkg_text(pkg, "get_name")
+                    if not name:
+                        continue
+                    installed_pkg = self._get_installed_package(name)
+                    installed_arch = self._get_pkg_arch(installed_pkg)
+                    pkg_arch = self._get_pkg_arch(pkg)
+                    if installed_arch and pkg_arch not in {installed_arch, "noarch"}:
+                        continue
 
-            name = self._safe_pkg_text(pkg, "get_name")
-            if not name:
-                continue
-            installed_pkg = self._get_installed_package(name)
-            installed_arch = self._get_pkg_arch(installed_pkg)
-            pkg_arch = self._get_pkg_arch(pkg)
-            if installed_arch and pkg_arch not in {installed_arch, "noarch"}:
-                continue
+                    self._ingest_pkg_into_cache(cache, pkg, installed=False)
+                    if installed_pkg is not None:
+                        self._ingest_pkg_into_cache(cache, installed_pkg, installed=True)
 
-            self._ingest_pkg_into_cache(cache, pkg, installed=False)
-            if installed_pkg is not None:
-                self._ingest_pkg_into_cache(cache, installed_pkg, installed=True)
+            items = list(cache.values())
+            # Filter out packages where:
+            # 1. Installed version matches candidate version exactly (same version from different repo)
+            # 2. Candidate version is older than installed (downgrade, not update)
+            raw = []
+            for app in items:
+                if app.installed_version and app.candidate_version:
+                    if app.installed_version == app.candidate_version:
+                        continue
+                    if self._compare_evr(app.candidate_version, app.installed_version) < 0:
+                        continue
+                raw.append(app)
+            raw.sort(key=lambda app: app.name.casefold())
+            self._upgradable_packages_raw = raw
 
-        items = list(cache.values())
-        # Filter out packages where:
-        # 1. Installed version matches candidate version exactly (same version from different repo)
-        # 2. Candidate version is older than installed (downgrade, not update)
-        filtered_items = []
-        for app in items:
-            if app.installed_version and app.candidate_version:
-                # Skip if versions match exactly
-                if app.installed_version == app.candidate_version:
-                    continue
-                # Skip if candidate is actually older (downgrade)
-                # This happens when a higher version was installed from @commandline
-                # but repo priority wants to "upgrade" to an older repo version
-                if self._compare_evr(app.candidate_version, app.installed_version) < 0:
-                    continue
-            filtered_items.append(app)
-        filtered_items.sort(key=lambda app: app.name.casefold())
-        return filtered_items
+        items = self._upgradable_packages_raw
+        if repo_id != "__all__":
+            items = [app for app in items if repo_id in app.repo_ids]
+        return list(items)
 
 
     def _resolve_upgrade_transaction(self):

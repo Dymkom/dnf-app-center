@@ -1153,6 +1153,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._data_revision = 0
         self.view_mode = "grid"  # Can be "grid" or "list"
         self._updating_view_buttons = False  # Flag to prevent toggle recursion
+        self._listbox_gen = 0
+        self._is_loading = False
 
         provider = Gtk.CssProvider()
         provider.load_from_bytes(GLib.Bytes.new(CSS))
@@ -1641,21 +1643,17 @@ class MainWindow(Adw.ApplicationWindow):
         self.news_panel_card.append(self.news_panel_content_box)
 
     def _build_queue_page(self) -> None:
-        scroller = Gtk.ScrolledWindow()
-        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.stack.add_titled(scroller, "queue", _("Queue"))
-
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         box.set_margin_top(8)
-        box.set_margin_bottom(20)
+        box.set_margin_bottom(60)
         box.set_margin_start(4)
         box.set_margin_end(4)
-        scroller.set_child(box)
+        box.set_vexpand(True)
+        self.stack.add_titled(box, "queue", _("Queue"))
 
         self.queue_progress = Gtk.ProgressBar()
         self.queue_progress.add_css_class("queue-progress")
         box.append(self.queue_progress)
-
 
         queue_title = Gtk.Label(label=_("Queued actions"), xalign=0)
         queue_title.add_css_class("title-4")
@@ -1677,7 +1675,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         log_scroll = Gtk.ScrolledWindow()
         log_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        log_scroll.set_min_content_height(220)
+        log_scroll.set_vexpand(True)
         log_scroll.set_child(self.queue_log_view)
         box.append(log_scroll)
 
@@ -1814,6 +1812,8 @@ class MainWindow(Adw.ApplicationWindow):
         spinner.start()
         self.status_label.set_text(message)
         self.title_label.set_text(_("Loading…"))
+        self.news_toggle_button.set_visible(False)
+        self.news_panel_revealer.set_reveal_child(False)
         self._clear_listbox()
         row = Gtk.ListBoxRow()
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -1832,6 +1832,7 @@ class MainWindow(Adw.ApplicationWindow):
     def _load_async(self, force: bool = False) -> None:
         if force:
             self._invalidate_page_caches()
+        self._is_loading = True
         self._show_loading_page(_("Loading AppStream metadata and DNF repositories…"))
 
         def worker() -> None:
@@ -1852,6 +1853,7 @@ class MainWindow(Adw.ApplicationWindow):
         threading.Thread(target=worker, daemon=True).start()
 
     def _load_succeeded(self, catalog: AppStreamCatalog, backend: DnfBackend, apps: list[AppEntry], repos: list[dict[str, str]], news_text: str) -> bool:
+        self._is_loading = False
         self.catalog = catalog
         self.backend = backend
         self.apps = apps
@@ -1907,6 +1909,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.news_panel_content_box.append(label)
 
     def _load_failed(self, exc: Exception, tb: str) -> bool:
+        self._is_loading = False
         self.status_label.set_text(_("Failed to load metadata."))
         self._show_toast(str(exc))
         self.title_label.set_text(_("Startup failed"))
@@ -1936,6 +1939,9 @@ class MainWindow(Adw.ApplicationWindow):
         self.current_subcategory = None
         self._update_nav_buttons()
         self._rebuild_subcategories()
+        if self._is_loading:
+            self._show_loading_page(_("Loading AppStream metadata and DNF repositories…"))
+            return
         self._refresh_main_page(preserve_scroll=False)
 
     def _update_nav_buttons(self) -> None:
@@ -2162,8 +2168,6 @@ class MainWindow(Adw.ApplicationWindow):
         scroller = None
         if visible == "list" and hasattr(self, "list_scroller"):
             scroller = self.list_scroller
-        elif visible == "queue":
-            scroller = self.stack.get_child_by_name("queue")
         elif visible == "repos" and hasattr(self, "repo_scroll"):
             scroller = self.repo_scroll
         elif visible == "details":
@@ -2182,8 +2186,6 @@ class MainWindow(Adw.ApplicationWindow):
         scroller = None
         if visible == "list" and hasattr(self, "list_scroller"):
             scroller = self.list_scroller
-        elif visible == "queue":
-            scroller = self.stack.get_child_by_name("queue")
         elif visible == "repos" and hasattr(self, "repo_scroll"):
             scroller = self.repo_scroll
         elif visible == "details":
@@ -2200,8 +2202,6 @@ class MainWindow(Adw.ApplicationWindow):
         scroller = None
         if visible == "list" and hasattr(self, "list_scroller"):
             scroller = self.list_scroller
-        elif visible == "queue":
-            scroller = self.stack.get_child_by_name("queue")
         elif visible == "repos" and hasattr(self, "repo_scroll"):
             scroller = self.repo_scroll
         elif visible == "details":
@@ -2442,28 +2442,31 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _rebuild_listbox(self, items: list[AppEntry] | None = None) -> None:
         self._clear_listbox()
-        items = items or []
+        self._listbox_gen += 1
+        gen = self._listbox_gen
+        items = list(items or [])
         self.empty_status.set_visible(not items)
+        if not items:
+            return
+
         update_mode = self.current_group == "system" and self.current_page == "updates" and not self.current_search_text
         compact_grid = (self.view_mode == "grid")
         cols = 3
-        if not compact_grid:
-            for app in items:
-                self.listbox.append(
-                    AppCardRow(
-                        app,
-                        (lambda entry, mode=("update" if update_mode else None): self._run_action_for_app(entry, mode)),
-                        self._open_details,
-                        self._queued_state_label,
-                        page_mode=("updates" if update_mode else "default"),
-                        update_selected=(app.primary_pkg in self.update_selection if app.primary_pkg else False),
-                        update_toggle_cb=self._toggle_update_selection if update_mode else None,
-                    )
-                )
-            return
+        # Chunk size must be a multiple of cols so grid rows are never split across batches
+        chunk_size = 30
 
-        for start in range(0, len(items), cols):
-            chunk = items[start:start + cols]
+        def make_row(app: AppEntry) -> AppCardRow:
+            return AppCardRow(
+                app,
+                (lambda entry, mode=("update" if update_mode else None): self._run_action_for_app(entry, mode)),
+                self._open_details,
+                self._queued_state_label,
+                page_mode=("updates" if update_mode else "default"),
+                update_selected=(app.primary_pkg in self.update_selection if app.primary_pkg else False),
+                update_toggle_cb=self._toggle_update_selection if update_mode else None,
+            )
+
+        def make_tile_row(chunk: list[AppEntry]) -> Gtk.ListBoxRow:
             row = Gtk.ListBoxRow()
             row.set_activatable(False)
             row.set_selectable(False)
@@ -2485,7 +2488,23 @@ class MainWindow(Adw.ApplicationWindow):
                 spacer.set_hexpand(True)
                 row_box.append(spacer)
             row.set_child(row_box)
-            self.listbox.append(row)
+            return row
+
+        def add_chunk(start: int) -> bool:
+            if self._listbox_gen != gen:
+                return GLib.SOURCE_REMOVE
+            end = min(start + chunk_size, len(items))
+            if not compact_grid:
+                for i in range(start, end):
+                    self.listbox.append(make_row(items[i]))
+            else:
+                for i in range(start, end, cols):
+                    self.listbox.append(make_tile_row(items[i:i + cols]))
+            if end < len(items):
+                GLib.idle_add(add_chunk, end, priority=GLib.PRIORITY_LOW)
+            return GLib.SOURCE_REMOVE
+
+        add_chunk(0)
 
     def _clear_listbox(self) -> None:
         child = self.listbox.get_first_child()
